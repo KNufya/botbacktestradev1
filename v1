@@ -1,0 +1,205 @@
+import pandas as pd
+import numpy as np
+import talib
+
+# --- Funciones auxiliares ---
+
+def calculate_sml_channel(df, period=400):
+    # SML Channel: mínimo y máximo en ventanas de 'period' minutos
+    # Asumimos que df está en 5m, entonces period=400 significa 400 velas
+    df['SML_Low'] = df['Low'].rolling(window=period).min()
+    df['SML_High'] = df['High'].rolling(window=period).max()
+    return df
+
+def calculate_ema(df, period=12):
+    df['EMA12'] = talib.EMA(df['Close'], timeperiod=period)
+    return df
+
+def calculate_rsi(df, period=14):
+    df['RSI14'] = talib.RSI(df['Close'], timeperiod=period)
+    return df
+
+def detect_pivot_support(df, idx):
+    # Pivote de soporte: mínimo local en SML Low
+    # Simplificado: el valor en idx es menor que sus vecinos inmediatos
+    if idx < 1 or idx > len(df)-2:
+        return False
+    return df['SML_Low'].iloc[idx] < df['SML_Low'].iloc[idx-1] and df['SML_Low'].iloc[idx] < df['SML_Low'].iloc[idx+1]
+
+def detect_pivot_resistance(df, idx):
+    # Pivote de resistencia: máximo local en SML High
+    if idx < 1 or idx > len(df)-2:
+        return False
+    return df['SML_High'].iloc[idx] > df['SML_High'].iloc[idx-1] and df['SML_High'].iloc[idx] > df['SML_High'].iloc[idx+1]
+
+def detect_bullish_divergence(df, idx, lookback=10):
+    # Placeholder simplificado para divergencia alcista Precio/RSI
+    # Buscamos que el precio haga un mínimo más bajo y RSI un mínimo más alto en lookback
+    if idx < lookback:
+        return False
+    price_min = df['Low'].iloc[idx-lookback:idx].min()
+    rsi_min = df['RSI14'].iloc[idx-lookback:idx].min()
+    current_price = df['Low'].iloc[idx]
+    current_rsi = df['RSI14'].iloc[idx]
+    # Condición básica: precio hace mínimo más bajo, RSI mínimo más alto
+    if current_price < price_min and current_rsi > rsi_min:
+        # Además, al menos un pico en zona extrema (RSI < 30 o RSI > 70) en lookback
+        if ((df['RSI14'].iloc[idx-lookback:idx] < 30).any() or (df['RSI14'].iloc[idx-lookback:idx] > 70).any()):
+            return True
+    return False
+
+def detect_bearish_divergence(df, idx, lookback=10):
+    # Placeholder simplificado para divergencia bajista Precio/RSI
+    if idx < lookback:
+        return False
+    price_max = df['High'].iloc[idx-lookback:idx].max()
+    rsi_max = df['RSI14'].iloc[idx-lookback:idx].max()
+    current_price = df['High'].iloc[idx]
+    current_rsi = df['RSI14'].iloc[idx]
+    # Condición básica: precio hace máximo más alto, RSI máximo más bajo
+    if current_price > price_max and current_rsi < rsi_max:
+        if ((df['RSI14'].iloc[idx-lookback:idx] < 30).any() or (df['RSI14'].iloc[idx-lookback:idx] > 70).any()):
+            return True
+    return False
+
+# --- Backtesting ---
+
+def backtest_strategy(df):
+    balance = 10000  # Capital inicial
+    position = None  # None, 'long' o 'short'
+    entry_price = 0
+    stop_loss = 0
+    take_profit_1 = 0
+    take_profit_2 = 0
+    take_profit_3 = 0
+    trades = []
+
+    for i in range(400, len(df)):  # Empezamos después de tener suficientes datos para SML Channel
+        row = df.iloc[i]
+
+        # Condiciones de entrada LONG
+        long_entry = (
+            detect_pivot_support(df, i) and
+            row['Close'] > row['EMA12'] and
+            detect_bullish_divergence(df, i)
+            # + filtros discrecionales (placeholder)
+        )
+
+        # Condiciones de entrada SHORT
+        short_entry = (
+            detect_pivot_resistance(df, i) and
+            row['Close'] < row['EMA12'] and
+            detect_bearish_divergence(df, i)
+            # + filtros discrecionales (placeholder)
+        )
+
+        if position is None:
+            if long_entry:
+                position = 'long'
+                entry_price = row['Close']
+                # Stop loss levemente por debajo del último mínimo (mecha)
+                stop_loss = df['Low'].iloc[i-10:i].min() * 0.995
+                # Take profits
+                risk = entry_price - stop_loss
+                take_profit_1 = entry_price + risk * 1.7
+                take_profit_2 = entry_price + risk * 3
+                # TP3 será cuando se confirme divergencia contraria (se chequea luego)
+                trades.append({'type': 'long', 'entry_index': i, 'entry_price': entry_price})
+                print(f"Long entry at {row.name} price {entry_price:.2f}")
+
+            elif short_entry:
+                position = 'short'
+                entry_price = row['Close']
+                stop_loss = df['High'].iloc[i-10:i].max() * 1.005
+                risk = stop_loss - entry_price
+                take_profit_1 = entry_price - risk * 1.7
+                take_profit_2 = entry_price - risk * 3
+                trades.append({'type': 'short', 'entry_index': i, 'entry_price': entry_price})
+                print(f"Short entry at {row.name} price {entry_price:.2f}")
+
+        else:
+            # Gestión de posición abierta
+            if position == 'long':
+                # Salida TP1 + BE
+                if row['High'] >= take_profit_1:
+                    # Mover stop loss a breakeven
+                    stop_loss = entry_price
+                    print(f"Long TP1 reached at {row.name}")
+
+                # Salida TP2
+                if row['High'] >= take_profit_2:
+                    print(f"Long TP2 reached at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': take_profit_2, 'result': take_profit_2 - entry_price})
+                    continue
+
+                # Salida TP3: divergencia bajista contraria
+                if detect_bearish_divergence(df, i):
+                    print(f"Long TP3 (divergencia contraria) at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': row['Close'], 'result': row['Close'] - entry_price})
+                    continue
+
+                # Stop loss
+                if row['Low'] <= stop_loss:
+                    print(f"Long stop loss hit at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': stop_loss, 'result': stop_loss - entry_price})
+                    continue
+
+            elif position == 'short':
+                # Salida TP1 + BE
+                if row['Low'] <= take_profit_1:
+                    stop_loss = entry_price
+                    print(f"Short TP1 reached at {row.name}")
+
+                # Salida TP2
+                if row['Low'] <= take_profit_2:
+                    print(f"Short TP2 reached at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': take_profit_2, 'result': entry_price - take_profit_2})
+                    continue
+
+                # Salida TP3: divergencia alcista contraria
+                if detect_bullish_divergence(df, i):
+                    print(f"Short TP3 (divergencia contraria) at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': row['Close'], 'result': entry_price - row['Close']})
+                    continue
+
+                # Stop loss
+                if row['High'] >= stop_loss:
+                    print(f"Short stop loss hit at {row.name}")
+                    position = None
+                    trades[-1].update({'exit_index': i, 'exit_price': stop_loss, 'result': entry_price - stop_loss})
+                    continue
+
+    return trades
+
+# --- Main ---
+
+def main():
+    # Carga datos OHLCV desde CSV
+    # El CSV debe tener columnas: Date, Open, High, Low, Close, Volume
+    df = pd.read_csv('ohlcv_5m.csv', parse_dates=['Date'], index_col='Date')
+
+    # Calcular indicadores
+    df = calculate_sml_channel(df, period=400)
+    df = calculate_ema(df, period=12)
+    df = calculate_rsi(df, period=14)
+
+    # Ejecutar backtest
+    trades = backtest_strategy(df)
+
+    # Resultados
+    wins = [t for t in trades if 'result' in t and t['result'] > 0]
+    losses = [t for t in trades if 'result' in t and t['result'] <= 0]
+    total_profit = sum(t['result'] for t in trades if 'result' in t)
+
+    print(f"Total trades: {len(trades)}")
+    print(f"Wins: {len(wins)}")
+    print(f"Losses: {len(losses)}")
+    print(f"Total profit: {total_profit:.2f}")
+
+if __name__ == "__main__":
+    main()
