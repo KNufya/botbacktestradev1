@@ -1,0 +1,4 @@
+Notas del powershell
+$env:SIMPLEFX_CLIENT_ID="xxxx"
+$env:SIMPLEFX_CLIENT_SECRET="TU_SECRET"
+$env:SIMPLEFX_BASE_URL="xxxx"
